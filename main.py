@@ -42,8 +42,9 @@ task_name = "cage_prediction"
 # "chromatin_features_histone_marks","chromatin_features_dna_accessibility",
 # "regulatory_element_promoter","regulatory_element_enhancer"]
 
-#goal is to do bulk rna expression, build a CNN baseline -> RNN baseline -> FNO baseline and compare.
+#goal is to do bulk rna expression eventually, build a CNN baseline -> RNN baseline -> FNO baseline and compare.
 #features to have after these three steps : UI and graphs, research paper attributed to this repo.
+#currently working on cage prediction as it may be quicker, can continue with bulk later on.
 
 #dataset = load_dataset(
     #"InstaDeepAI/genomics-long-range-benchmark", "bulk_rna_expression",
