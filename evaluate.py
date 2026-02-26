@@ -1,0 +1,194 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import r2_score, mean_absolute_error
+from datasets import load_dataset
+from scipy.signal import find_peaks
+
+
+#RUN IN TERMINAL
+print("=" * 60)
+print("CNN BASELINE EVALUATION")
+print("=" * 60)
+
+label_mean = 0.1963
+label_std = 4.7285
+
+
+# ========== DEFINE CNN CLASS ==========
+class CNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv1d(4, 32, kernel_size=5)
+        self.conv2 = nn.Conv1d(32, 64, kernel_size=5)
+        self.pool = nn.MaxPool1d(2)
+        self.conv2_drop = nn.Dropout(0.3)
+        self.fc1 = nn.Linear(64 * 509, 256)
+        self.fc2 = nn.Linear(256, 800)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = self.pool(x)
+        x = F.relu(self.conv2(x))
+        x = self.pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.conv2_drop(F.relu(self.fc1(x)))
+        x = self.fc2(x)
+        return x.view(-1, 16, 50)
+
+
+# ========== ENCODING FUNCTION ==========
+def encoding(seq):
+    mapping = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 0}
+    indices = torch.tensor([mapping.get(base, 0) for base in seq], dtype=torch.long)
+    one_hot = torch.zeros(4, len(seq))
+    one_hot[indices, torch.arange(len(seq))] = 1
+    return one_hot
+
+
+# ========== LOAD DATASET ==========
+print("\nLoading test dataset...")
+dataset = load_dataset(
+    "InstaDeepAI/genomics-long-range-benchmark",
+    task_name="cage_prediction",
+    sequence_length=2048,
+    trust_remote_code=True,
+    cache_dir="C:/genomics"
+)
+test_set = dataset["test"]
+print(f"Test set: {len(test_set)} examples")
+
+# ========== LOAD MODEL ==========
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+model = CNN()
+model.load_state_dict(torch.load("CNN_testline/cnn_baseline.pth", map_location=device))
+model = model.to(device)
+model.eval()
+
+print(" Model loaded successfully\n")
+
+# ========== EVALUATE ==========
+print("Model loaded successfully\n")
+
+# ========== DIAGNOSTIC ==========
+print("CHECKING IF MODEL OUTPUTS VARY:")
+
+test_sample_1 = test_set[0]
+test_sample_2 = test_set[100]
+
+seq1 = encoding(test_sample_1['sequence']).unsqueeze(0).to(device)
+seq2 = encoding(test_sample_2['sequence']).unsqueeze(0).to(device)
+
+with torch.no_grad():
+    out1 = model(seq1)
+    out2 = model(seq2)
+
+print(f"Sample 1 output - Mean: {out1.mean():.6f}, Std: {out1.std():.6f}")
+print(f"Sample 2 output - Mean: {out2.mean():.6f}, Std: {out2.std():.6f}")
+print(f"Difference between samples: {(out1 - out2).abs().mean():.6f}")
+
+if (out1 - out2).abs().mean() < 0.001:
+    print("WARNING: Model outputs are nearly identical for different inputs!")
+    print("   Model has COLLAPSED to predicting constant values!")
+else:
+    print("Model outputs vary (good)")
+
+print(f"\nFirst 20 predictions sample 1: {out1.flatten()[:20].cpu().numpy()}")
+print(f"First 20 predictions sample 2: {out2.flatten()[:20].cpu().numpy()}")
+print("=" * 60)
+print()
+# ========== END DIAGNOSTIC ==========
+test_loader = torch.utils.data.DataLoader(test_set, batch_size=32, shuffle=False, num_workers=0)
+
+all_preds = []
+all_labels = []
+total_loss = 0
+loss_fn = nn.HuberLoss(delta=1)
+
+print("Evaluating...")
+
+with torch.no_grad():
+    for batch_idx, batch in enumerate(test_loader):
+        actual_batch_size = len(batch["sequence"])
+
+        # Sequences
+        sequences = torch.stack([encoding(seq) for seq in batch["sequence"]]).to(device)
+
+        # Labels
+        labels_np = np.array(batch["labels"])
+        if labels_np.shape != (actual_batch_size, 16, 50):
+            labels_np = labels_np.transpose(2, 0, 1)
+
+        labels = torch.from_numpy(labels_np.astype(np.float32)).to(device)
+        labels = (labels - label_mean) / label_std
+
+        # Predict
+        outputs = model(sequences)
+        loss = loss_fn(outputs, labels)
+        total_loss += loss.item()
+
+        # Store
+        all_preds.append(outputs.cpu().numpy())
+        all_labels.append(labels.cpu().numpy())
+
+        if batch_idx % 10 == 0:
+            print(f"  Batch {batch_idx}/{len(test_loader)}")
+
+print("Done!\n")
+
+# ========== METRICS ==========
+preds = np.concatenate(all_preds).flatten()
+labels = np.concatenate(all_labels).flatten()
+
+test_mse = total_loss / len(test_loader)
+test_mae = mean_absolute_error(labels, preds)
+r2 = r2_score(labels, preds)
+pearson_r = pearsonr(preds, labels)[0]
+spearman_r = spearmanr(preds, labels)[0]
+
+# ========== RESULTS ==========
+
+
+# Get one example
+sample_idx = 0
+pred = all_preds[sample_idx].flatten()
+actual = all_labels[sample_idx].flatten()
+
+# Find TSS peaks (height > 1.0 threshold) - transcription start states
+pred_peaks, _ = find_peaks(pred, height=1.0)
+actual_peaks, _ = find_peaks(actual, height=1.0)
+
+print(f"Real TSS locations: {actual_peaks}")
+print(f"Predicted TSS: {pred_peaks}")
+
+# Check if they match (within 50bp)
+matches = 0
+for true_peak in actual_peaks:
+    distances = np.abs(pred_peaks - true_peak)
+    if len(distances) > 0 and distances.min() <= 50:
+        matches += 1
+
+recall = matches / len(actual_peaks) if len(actual_peaks) > 0 else 0
+print(f"Found {matches}/{len(actual_peaks)} real TSS = {recall:.1%} recall")
+print("=" * 60)
+print("CNN BASELINE TEST RESULTS")
+print("=" * 60)
+print(f"  Test MSE:      {test_mse:.4f}")
+print(f"  Test MAE:      {test_mae:.4f}")
+print(f"  R² Score:      {r2:.4f}")
+print(f"  Pearson R:     {pearson_r:.4f}  <- KEY METRIC")
+print(f"  Spearman R:    {spearman_r:.4f}")
+print("=" * 60)
+
+if pearson_r > 0.4:
+    print("\n EXCELLENT! Ready for RNN!")
+elif pearson_r > 0.3:
+    print("\nGOOD baseline. Move to RNN.")
+elif pearson_r > 0.1:
+    print("\n MEDIOCRE but usable.")
+else:
+    print("\n POOR. Model didn't learn.")
