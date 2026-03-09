@@ -12,6 +12,8 @@ import torch.nn.utils.rnn as rnn_utils
 
 #RUN IN TERMINAL
 """ 
+(.venv) PS C: \ Users \ User\PycharmProjects\PythonProject\CS4100-Research-project> C:
+\ Users \ User \PycharmProjects\PythonProject\.venv\Scripts\python.exe .\RNN_baseline.py                                                                                 
 dataset at 2.19 version for now
 Input: a genomic nucleotide sequence centered on the SNP with the 
 reference allele at the SNP location, 

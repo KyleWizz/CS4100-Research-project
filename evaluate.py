@@ -96,12 +96,10 @@ if (out1 - out2).abs().mean() < 0.001:
     print("   Model has COLLAPSED to predicting constant values!")
 else:
     print("Model outputs vary (good)")
-
-print(f"\nFirst 20 predictions sample 1: {out1.flatten()[:20].cpu().numpy()}")
-print(f"First 20 predictions sample 2: {out2.flatten()[:20].cpu().numpy()}")
 print("=" * 60)
 print()
-# ========== END DIAGNOSTIC ==========
+
+# ========== EVALUATE ==========
 test_loader = torch.utils.data.DataLoader(test_set, batch_size=32, shuffle=False, num_workers=0)
 
 all_preds = []
@@ -114,11 +112,8 @@ print("Evaluating...")
 with torch.no_grad():
     for batch_idx, batch in enumerate(test_loader):
         actual_batch_size = len(batch["sequence"])
-
-        # Sequences
         sequences = torch.stack([encoding(seq) for seq in batch["sequence"]]).to(device)
 
-        # Labels
         labels_np = np.array(batch["labels"])
         if labels_np.shape != (actual_batch_size, 16, 50):
             labels_np = labels_np.transpose(2, 0, 1)
@@ -126,12 +121,10 @@ with torch.no_grad():
         labels = torch.from_numpy(labels_np.astype(np.float32)).to(device)
         labels = (labels - label_mean) / label_std
 
-        # Predict
         outputs = model(sequences)
         loss = loss_fn(outputs, labels)
         total_loss += loss.item()
 
-        # Store
         all_preds.append(outputs.cpu().numpy())
         all_labels.append(labels.cpu().numpy())
 
@@ -150,30 +143,6 @@ r2 = r2_score(labels, preds)
 pearson_r = pearsonr(preds, labels)[0]
 spearman_r = spearmanr(preds, labels)[0]
 
-# ========== RESULTS ==========
-
-
-# Get one example
-sample_idx = 0
-pred = all_preds[sample_idx].flatten()
-actual = all_labels[sample_idx].flatten()
-
-# Find TSS peaks (height > 1.0 threshold) - transcription start states
-pred_peaks, _ = find_peaks(pred, height=1.0)
-actual_peaks, _ = find_peaks(actual, height=1.0)
-
-print(f"Real TSS locations: {actual_peaks}")
-print(f"Predicted TSS: {pred_peaks}")
-
-# Check if they match (within 50bp)
-matches = 0
-for true_peak in actual_peaks:
-    distances = np.abs(pred_peaks - true_peak)
-    if len(distances) > 0 and distances.min() <= 50:
-        matches += 1
-
-recall = matches / len(actual_peaks) if len(actual_peaks) > 0 else 0
-print(f"Found {matches}/{len(actual_peaks)} real TSS = {recall:.1%} recall")
 print("=" * 60)
 print("CNN BASELINE TEST RESULTS")
 print("=" * 60)
@@ -185,10 +154,10 @@ print(f"  Spearman R:    {spearman_r:.4f}")
 print("=" * 60)
 
 if pearson_r > 0.4:
-    print("\n EXCELLENT! Ready for RNN!")
+    print("\nEXCELLENT!")
 elif pearson_r > 0.3:
-    print("\nGOOD baseline. Move to RNN.")
+    print("\nGOOD baseline.")
 elif pearson_r > 0.1:
-    print("\n MEDIOCRE but usable.")
+    print("\nMEDIOCRE but usable.")
 else:
-    print("\n POOR. Model didn't learn.")
+    print("\nPOOR. Model didn't learn.")
