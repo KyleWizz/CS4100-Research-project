@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,13 +9,18 @@ import torchvision
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 import os
+#from torch.optim._muon import Muon
+#from muon import Muon
+#from muon import MuonWithAuxAdam - maybe
 import numpy as np
-import torch.nn.utils.rnn as rnn_utils
+from torch.utils.tensorboard import SummaryWriter
 
+import torch.nn.utils.rnn as rnn_utils
+#some libs imported in case
 #RUN IN TERMINAL
 """ 
-(.venv) PS C: \ Users \ User\PycharmProjects\PythonProject\CS4100-Research-project> C:
-\ Users \ User \PycharmProjects\PythonProject\.venv\Scripts\python.exe .\RNN_baseline.py                                                                                 
+(.venv) PS C:  Users \ User\PycharmProjects\PythonProject\CS4100-Research-project> C:
+ Users \ User \PycharmProjects\PythonProject\.venv\Scripts\python.exe .\RNN_baseline.py                                                                                 
 dataset at 2.19 version for now
 Input: a genomic nucleotide sequence centered on the SNP with the 
 reference allele at the SNP location, 
@@ -21,7 +28,7 @@ a genomic nucleotide sequence centered on the
 SNP with the alternative allele at the SNP location, and tissue type
 Output: a binary value referring to whether the variant has a causal effect on gene expression
 run in the venv (working on pycharm implementation
-
+/pip.exe install git+https://github.com/KellerJordan/Muon
 DISCLAIMER: 
 torch==2.10.0
 datasets==2.19.0 - huggingface dataset wouldnt work with newer versions, pain! probably better solution but
@@ -33,14 +40,18 @@ numpy==1.26.4 - i think any version of numpy works it was giving errors though
 scipy==1.11.4
 scikit-learn==1.3.2
 pandas = 2.2.2 for numpy
+experimenting w/ muon - can use optim but 2.5.1 doesnt have moon built into pytorch optim
 """
 sequence_length=2048
+#trained on 2048 bp len sequence (ACTGN)
 
 #task_name = "variant_effect_causal_eqtl"
 #task_name = "bulk_rna_expression"
 #vector of 218 different tissue types - sequence outputs the same vector matrix [218]
 bulk_rna_expression = 218
 task_name = "cage_prediction"
+run_name = f"{datetime.now().strftime('rnn_run-%Y%m%d_%H%M%S')}"
+writer = SummaryWriter(log_dir=f"runs/{run_name}")
 # One of:
 # ["variant_effect_causal_eqtl","variant_effect_pathogenic_clinvar",
 # "variant_effect_pathogenic_omim","cage_prediction", "bulk_rna_expression",
@@ -85,21 +96,53 @@ Dataset({
 '''
 training_set = dataset["train"]
 test_set = dataset["test"]
-#3 since it takes a little!
-epochs = 3
+#since it takes a little!
+epochs = 50
 batch_size = 32
 
 print(training_set)
 
 print(test_set)
 
-#one-hot encode
+#one-hot encode nucleotide sequences
 def encoding(seq):
     mapping = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 0}
     indices = torch.tensor([mapping.get(base, 0) for base in seq])
     one_hot = torch.zeros(4, len(seq))  # [4, 2048]
     one_hot[indices, torch.arange(len(seq))] = 1
     return one_hot
+
+#data seems to have some outliers, so weight as well
+#CAGE signalling has lots of potential noise, read more:
+"""
+Citations:
+Grigoriadis, D., Perdikopanis, N., Georgakilas, G.K. et al. DeepTSS:
+ multi-branch convolutional neural network for transcription start 
+ site identification from CAGE data. BMC Bioinformatics 23 (Suppl 2),
+  395 (2022). https://doi.org/10.1186/s12859-022-04945-y
+  
+"""
+class WeightedHuberLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred, target):
+        weights = torch.ones_like(target)
+        weights[target > 0.3] = 30.0
+        weights[target > 0.7] = 60.0
+        weights[target > 1.3] = 93.0
+
+        # Huber loss with weights - input tensors
+        diff = pred - target
+        abs_diff = torch.abs(diff)
+        #computer loss
+        loss = torch.where(
+            abs_diff < 1.0,
+            0.5 * diff ** 2 * weights,
+            (abs_diff - 0.5) * weights
+        )
+        return loss.mean()
+
 #debugging
 all_labels_list = []
 for i in range(min(1000, len(training_set))):  # Sample 1000 examples
@@ -112,8 +155,12 @@ print(f"Label std: {label_std:.4f}")
 print(f"Label max: {np.max(all_labels_list):.4f}")
 print(f"Label min: {np.min(all_labels_list):.4f}\n")
 
-
+"""
+Our Bidirectional LSTM 
+Forward func for training
+"""
 class BidLSTM(nn.Module):
+    #4 for A C T G
     def __init__(self, input_size = 4, hidden_size = 256, num_layers = 2, num_classes = 800):
         super(BidLSTM, self).__init__()
         self.hidden_size = hidden_size
@@ -128,23 +175,27 @@ class BidLSTM(nn.Module):
 
         # Forward propagate LSTM
         out, _ = self.lstm(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size*2)
-
         # Decode the hidden state of the last time step
-        out = self.fc(out[:, -1, :])
+        out = self.fc(out.mean(dim=1))
         return out
 
 def rnn_model():
     torch.cuda.set_device(0)
+    #get gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
+    #puts model to gpu
     model = BidLSTM().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=.0001)
+    optimizer = optim.Adam(model.parameters(), lr=.001)
 
+    #if learning stagnates lower rate
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=2
     )
-    loss = nn.MSELoss() #trying MSE loss first and then see if more accurate than CNN
+    loss = WeightedHuberLoss()
+    #trying MSE loss first and then huber to see if more accurate than CNN
+    #Huber loss may be better because there are definitely outliers in the data
     training_loader = torch.utils.data.DataLoader(training_set,
                                         batch_size=batch_size,
                                         shuffle=True,
@@ -157,11 +208,11 @@ def rnn_model():
         for batch_idx, batch in enumerate(training_loader):
             # prep
             sequences = torch.stack([encoding(seq).permute(1, 0) for seq in batch["sequence"]]).to(device)
-            # sequences = sequences.unsqueeze(1).to(device)
+            # sequences = sequences.unsqueeze(1).to(device) - not needed
             labels_np = np.array(batch["labels"])
             # needed to debug with help
             if labels_np.shape != (batch_size, 16, 50):
-                labels_np = labels_np.transpose(2, 0, 1)  # Reorder to [32, 16, 50]
+                labels_np = labels_np.transpose(2, 0, 1)  # Reorder to fit RNN
             # normalizing was only way I could decrease the MSE we got during epoch training
             labels = torch.from_numpy(labels_np.astype(np.float32)).to(device)
             labels = (labels - label_mean) / label_std
@@ -178,17 +229,38 @@ def rnn_model():
                 with torch.no_grad():
                     pred_std = outputs.std().item()
                     pred_mean = outputs.mean().item()
+                global_step = epoch * len(training_loader) + batch_idx
+                writer.add_scalar("Loss/batch", batch_loss.item(), global_step)
+                writer.add_scalar("Predictions/std", pred_std, global_step)
+                writer.add_scalar("Predictions/mean", pred_mean, global_step)
                 print(f"Epoch {epoch + 1}/{epochs} | Batch "
                       f"{batch_idx}/{len(training_loader)} "
                       f"| Batch Loss: {batch_loss.item():.4f} "
-                      f"| Pred std: {pred_std:.4f}")  # ADD THIS
+                      f"| Pred std: {pred_std:.4f}")
 
-                if pred_std < 0.01:  # ADD THIS CHECK
+                if pred_std < 0.01:
                     print("Model collapsing! Predictions too constant")
 
         avg_loss = epoch_loss / len(training_loader)
         scheduler.step(avg_loss)
+        if not torch.isnan(outputs).any():
+            writer.add_histogram("Predictions/distribution", outputs.detach(), epoch)
+            writer.add_histogram("Labels/distribution", labels, epoch)
+        else:
+            print(f"Skipping histogram at epoch {epoch} — NaN outputs detected")
+        writer.add_scalar("Loss/epoch_avg", avg_loss, epoch)
+        writer.add_scalar("LR", optimizer.param_groups[0]['lr'], epoch)
+        if(epoch == 25):
+            #used ai for writer just for easier time
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            opt_name = type(optimizer).__name__  # e.g. "Adam"
+            checkpoint_name = f"rnn_baseline_epoch{epoch}_{timestamp}_{opt_name}"
+            writer_mid = SummaryWriter(log_dir=f"runs/{checkpoint_name}")
+            torch.save(model.state_dict(), f"RNN_testline/{checkpoint_name}.pth")
+            writer_mid.close()
+
         print(f"Epoch {epoch + 1}/{epochs}.. " + f" | {avg_loss}")
+    writer.close()
     torch.save(model.state_dict(), "RNN_testline/rnn_baseline.pth")
     print("Training complete! saved to rnn_baseline.pth")
     return model
