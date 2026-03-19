@@ -145,7 +145,7 @@ print("=" * 60)
 print(f"  Test MSE:      {test_mse:.4f}")
 print(f"  Test MAE:      {test_mae:.4f}")
 print(f"  R² Score:      {r2:.4f}")
-print(f"  Pearson R:     {pearson_r:.4f}  <- KEY METRIC")
+print(f"  Pearson R:     {pearson_r:.4f}  <- USELESS")
 print(f"  Spearman R:    {spearman_r:.4f}")
 print("=" * 60)
 
@@ -156,4 +156,4 @@ elif pearson_r > 0.3:
 elif pearson_r > 0.1:
     print("\nMEDIOCRE but usable.")
 else:
-    print("\nPOOR. Model didn't learn.")
+    print("\nmodel not linear.")
