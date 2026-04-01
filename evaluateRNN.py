@@ -16,6 +16,29 @@ print("=" * 60)
 label_mean = 0.1963
 label_std = 4.7285
 
+"""
+testing
+import glob
+
+checkpoints = glob.glob("RNN_testline/*.pth")
+results = {}
+for ckpt_path in checkpoints:
+    ckpt_name = os.path.basename(ckpt_path)
+    try:
+        model = BidLSTM().to(device)
+        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        loss = evaluate_rnn(model, test_set, device)
+        results[ckpt_name] = loss
+        print(f"{ckpt_name}: {loss:.4f}")
+    except Exception as e:
+        print(f"{ckpt_name}: FAILED ({e})")
+
+print("\n rank:")
+for ckpt_path in checkpoints:
+    ckpt_name = os.path.basename(ckpt_path)
+for name, loss in sorted(results.items(), key=lambda x: x[1]):
+    print(f"{loss:.4f}  {name}")
+"""
 
 # ========== DEFINE RNN CLASS ==========
 class BidLSTM(nn.Module):
@@ -23,17 +46,51 @@ class BidLSTM(nn.Module):
         super(BidLSTM, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
-        self.fc = nn.Linear(hidden_size * 2, num_classes)
+
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True, dropout=0.15)
+        self.dropout = nn.Dropout(0.27)  # signs of overfitting
+        # https://codesignal.com/learn/courses -- good resource
+        # /improving-neural-networks-with-pytorch/lessons/adding-dropout-to-neural-networks-in-pytorch
+        self.fc = nn.Linear(hidden_size * 2, num_classes)  # Multiply by 2 because of bidirectional
+
+        # CHECKING:
+
+        # attempting to put conv layer over rnn
+        # self.conv = nn.Sequential(
+        #     nn.Conv1d(4, 64, kernel_size=7, padding=3),
+        #     nn.ReLU(),
+        #     nn.MaxPool1d(kernel_size=4, stride=4),  # 2048 → 512
+        #     nn.Dropout(0.1)
+        # )
+        self.attention = nn.Linear(hidden_size * 2, 1)
 
     def forward(self, x):
-        h0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)
+        # Set initial states
+
+        # just trying to place conv layer on top
+        # x = x.permute(0, 2, 1)  # [B, 2048, 4] -> [B, 4, 2048]
+        # x = self.conv(x)  # [B, 4, 2048] -> [B, 64, 512]
+        # x = x.permute(0, 2, 1)  # [B, 64, 512] -> [B, 512, 64]
+
+        h0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)  # 2 for bidirectional
         c0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)
-        out, _ = self.lstm(x, (h0, c0))
-        out = self.fc(out[:, -1, :])
+
+        # Forward propagate LSTM
+        out, _ = self.lstm(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size*2)
+        # Decode the hidden state of the last time step
+
+        # this might make or break model b/c trained like this.
+        # not sure if attention pooling would be better - attempting...
+        # becuase of high values of CAGE.
+
+        # TESTING - ATTENTION POOLING
+        attn = torch.softmax(self.attention(out), dim=1)
+        out = (out * attn).sum(dim=1)
+        # TEST END
+
+        out = self.dropout(out)  # .mean(dim=1)
+        out = self.fc(out)
         return out
-
-
 # ========== ENCODING FUNCTION ==========
 def encoding(seq):
     mapping = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 0}
@@ -60,7 +117,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 model = BidLSTM()
-model.load_state_dict(torch.load("RNN_testline/rnn_baseline.pth", map_location=device))
+
+model.load_state_dict(torch.load("RNN_testline/rnn_best4checkptbest_current.pth", map_location=device))
+# model.load_state_dict(torch.load("runs/62EpochGoodResults/", map_location=device))
 
 model = model.to(device)
 model.eval()
@@ -115,7 +174,7 @@ with torch.no_grad():
             labels_np = labels_np.transpose(2, 0, 1)
 
         labels = torch.from_numpy(labels_np.astype(np.float32)).to(device)
-        labels = (labels - label_mean) / label_std
+        labels = torch.log1p(labels)
 
         outputs = model(sequences).view(-1, 16, 50)
         loss = loss_fn(outputs, labels)
@@ -145,7 +204,7 @@ print("=" * 60)
 print(f"  Test MSE:      {test_mse:.4f}")
 print(f"  Test MAE:      {test_mae:.4f}")
 print(f"  R² Score:      {r2:.4f}")
-print(f"  Pearson R:     {pearson_r:.4f}  <- USELESS")
+print(f"  Pearson R:     {pearson_r:.4f}")
 print(f"  Spearman R:    {spearman_r:.4f}")
 print("=" * 60)
 

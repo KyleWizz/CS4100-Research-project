@@ -65,7 +65,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 model = CNN()
-model.load_state_dict(torch.load("CNN_testline/cnn_baseline.pth", map_location=device))
+model.load_state_dict(torch.load("CNN_testline/cnn_best_checkpoint.pth", map_location=device))
+
 model = model.to(device)
 model.eval()
 
@@ -149,7 +150,7 @@ print("=" * 60)
 print(f"  Test MSE:      {test_mse:.4f}")
 print(f"  Test MAE:      {test_mae:.4f}")
 print(f"  R² Score:      {r2:.4f}")
-print(f"  Pearson R:     {pearson_r:.4f}  <- USELESS FOR MODEL")
+print(f"  Pearson R:     {pearson_r:.4f}  <- METRIC FOR EXPERIMENT")
 print(f"  Spearman R:    {spearman_r:.4f}")
 print("=" * 60)
 

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,6 +10,7 @@ import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 import os
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
 
 #RUN IN TERMINAL
 """ 
@@ -19,7 +22,7 @@ SNP with the alternative allele at the SNP location, and tissue type
 Output: a binary value referring to whether the variant has a causal effect on gene expression
 run in the venv (working on pycharm implementation
 
-DISCLAIMER: 
+DISCLAIMER: env.
 torch==2.10.0
 datasets==2.19.0 - huggingface dataset wouldnt work with newer versions, pain!
 python=3.12 environment since errors w/ databases
@@ -29,11 +32,11 @@ numpy==1.26.4 - i think any version of numpy works it was giving errors though
 scipy==1.11.4
 scikit-learn==1.3.2
 """
-sequence_length=2048
+sequence_length=131072 # (sequence_length // 128) % 2 == 0
 
 #task_name = "variant_effect_causal_eqtl"
 #task_name = "bulk_rna_expression"
-#vector of 218 different tissue types - sequence outputs the same vector matrix [218]
+#vector of 218 different ti ssue types - sequence outputs the same vector matrix [218]
 bulk_rna_expression = 218
 task_name = "cage_prediction"
 # One of:
@@ -80,12 +83,14 @@ Dataset({
 '''
 training_set = dataset["train"]
 test_set = dataset["test"]
-epochs = 10
+epochs = 100
 batch_size = 32
 
 print(training_set)
 
 print(test_set)
+run_name = f"{datetime.now().strftime('cnn_run-%Y%m%d_%H%M%S')}"
+writer = SummaryWriter(log_dir=f"runs/{run_name}")
 
 #one-hot encode
 def encoding(seq):
@@ -139,9 +144,9 @@ class WeightedHuberLoss(nn.Module):
 
     def forward(self, pred, target):
         weights = torch.ones_like(target)
-        weights[target > 0.3] = 40.0
-        weights[target > 0.7] = 70.0
-        weights[target > 1.3] = 120.0
+        weights[target > 0.69] = 5.0
+        weights[target > 1.39] = 12.0
+        weights[target > 2.40] = 25.0
 
         # Huber loss with weights
         diff = pred - target
@@ -172,12 +177,14 @@ def cnnModel():
                                                     num_workers=0)
     #print(iter(training_loader))
     print(f"Starting training for {epochs} epochs...\n")
+    val_set = dataset['validation']
+    val_loader = torch.utils.data.DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=0)
     for epoch in range(epochs):
         model.train()
         epoch_loss = 0
         for batch_idx, batch in enumerate(training_loader):
             #prep
-            sequences = torch.stack([encoding(seq) for seq in batch["sequence"]])
+            sequences = torch.stack([encoding(seq) for seq in batch["sequence"]]).to(device)
             #sequences = sequences.unsqueeze(1).to(device)
             labels_np = np.array(batch["labels"])
             #needed to debug with help
@@ -185,11 +192,15 @@ def cnnModel():
                 labels_np = labels_np.transpose(2, 0, 1)  # Reorder to [32, 16, 50]
             #normalizing was only way I could decrease the MSE we got during epoch training
             labels = torch.from_numpy(labels_np.astype(np.float32)).to(device)
-            labels = (labels - label_mean) / label_std
+            labels = torch.log1p(labels) #changed to logs from mean-std
             optimizer.zero_grad()
             outputs = model(sequences)
             #add outputs with labels to our loss
             batch_loss = loss(outputs, labels)
+            if torch.isnan(batch_loss) or torch.isinf(batch_loss) or batch_loss.item() > 1.5:
+                optimizer.zero_grad()
+                continue
+
             epoch_loss += batch_loss.item()
             batch_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)
@@ -203,15 +214,46 @@ def cnnModel():
                       f"{batch_idx}/{len(training_loader)} "
                       f"| Batch Loss: {batch_loss.item():.4f} "
                       f"| Pred std: {pred_std:.4f}")  # ADD THIS
-
+                writer.add_scalar("Loss/batch", batch_loss.item(), epoch * len(training_loader) + batch_idx)
+                writer.add_scalar("Predictions/std", pred_std, epoch * len(training_loader) + batch_idx)
                 if pred_std < 0.01:  # ADD THIS CHECK
                     print("Model collapsing! Predictions too constant")
 
         avg_loss = epoch_loss / len(training_loader)
-        scheduler.step(avg_loss)
+
+
+        #VALIDATION CHECK --
+
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                sequences = torch.stack([encoding(s) for s in batch["sequence"]]).to(device)
+                labels_np = np.array(batch["labels"])
+                if labels_np.shape != (labels_np.shape[0], 16, 50):
+                    labels_np = labels_np.transpose(2, 0, 1)
+                labels = torch.from_numpy(labels_np.astype(np.float32)).to(device)
+                labels = torch.log1p(labels)
+                outputs = model(sequences).view(-1, 16, 50)
+                val_loss += loss(outputs, labels).item()
+        val_loss /= len(val_loader)
+        writer.add_scalar("Loss/val", val_loss, epoch)
+        writer.add_scalar("Loss/epoch_avg", avg_loss, epoch)
+        best_val_loss = float('inf')
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), "CNN_testline/cnn_best_checkpoint.pth")
+            print(f"  New best val: {best_val_loss:.4f}")
+        scheduler.step(val_loss)
+        print(f"Epoch {epoch + 1}/{epochs} | avg: {avg_loss:.4f} | val: {val_loss:.4f}")
+
         print(f"Epoch {epoch+1}/{epochs}.. " + f" | {avg_loss}")
-    torch.save(model.state_dict(), "CNN_testline/cnn_baseline.pth")
-    print("Training complete! saved to cnn_baseline.pth")
+        #--
+    writer.close()
+    os.makedirs("CNN_testline", exist_ok=True)
+    torch.save(model.state_dict(), "CNN_testline/cnn_baseline2.pth")
+    print("Training complete! saved to cnn_baseline2.pth")
+
     return model
 
 if __name__ == '__main__':
