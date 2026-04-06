@@ -40,7 +40,7 @@ scikit-learn==1.3.2
 pandas = 2.2.2 for numpy
 experimenting w/ muon - can use optim but 2.5.1 doesnt have moon built into pytorch optim
 """
-sequence_length = 128000
+sequence_length = 2048
 # trained on 2048 bp len sequence (ACTGN)
 
 # task_name = "variant_effect_causal_eqtl"
@@ -96,7 +96,7 @@ training_set = dataset["train"]
 test_set = dataset["test"]
 # since it takes a little!
 epochs = 200
-batch_size = 4
+batch_size = 32
 
 print(training_set)
 
@@ -179,20 +179,13 @@ class FNO_class(nn.Module):
         #     hidden_channels=64,
         #     n_layers=4,
         # )
-        self.downsample = nn.Sequential(
-            nn.Conv1d(4, 32, kernel_size=7, stride=64, padding=3),  # 131000 → ~2047
-            nn.GELU(),
-            nn.Conv1d(32, 32, kernel_size=5, stride=2, padding=2),  # ~2047 → ~1024
-            nn.GELU(),
-        )
         self.fno = FNO(
-            n_modes=(min(64, sequence_length // 2 - 1),), # was 64
-            in_channels=32,
+            n_modes=(32,),  # was 64
+            in_channels=4,
             out_channels=16,  # was 32
-            hidden_channels=64,  # was 64
-            n_layers=4,
+            hidden_channels=32,  # was 64
+            n_layers=3,  # was 4
         )
-
         self.pool = nn.AdaptiveAvgPool1d(50)  # [batch, 32, 25]
         #using staack
         self.stack = nn.Sequential(
@@ -210,8 +203,7 @@ class FNO_class(nn.Module):
 
     def forward(self, x):
         # x: [batch, 4, 2048] — no permute needed unlike RNN
-        out = self.downsample(x)
-        out = self.fno(out)       # [batch, 32, 2048]
+        out = self.fno(x)       # [batch, 32, 2048]
         out = self.pool(out)    # [batch, 32, 25]
         out = out.flatten(1)    # [batch, 800]
         out = self.stack(out)      # [batch, 800]
@@ -221,8 +213,6 @@ def FNO_model():
     torch.cuda.set_device(0)
     # get gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
     print(f"Using device: {device}")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     # puts model to gpu
@@ -233,7 +223,8 @@ def FNO_model():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=35
     )
-    loss = WeightedHuberLoss(label_mean, label_std)
+    # loss = WeightedHuberLoss(label_mean, label_std)
+    loss = torch.nn.PoissonNLLLoss(reduction='mean', eps=1e-8, full=True, log_input=True)
     # trying MSE loss first and then huber to see if more accurate than CNN
     # Huber loss may be better because there are definitely outliers in the data
     training_loader = torch.utils.data.DataLoader(training_set,
@@ -246,7 +237,6 @@ def FNO_model():
                                              shuffle=False,
                                              num_workers=0
                                              )
-    scaler = torch.amp.GradScaler()
     # print(iter(training_loader))
     print(f"Starting training for {epochs} epochs...\n")
     best_loss = float('inf')
@@ -254,7 +244,6 @@ def FNO_model():
     for epoch in range(epochs):
         model.train()
         epoch_loss = 0
-
         for batch_idx, batch in enumerate(training_loader):
             # prep
             sequences = torch.stack([encoding(seq) for seq in batch["sequence"]]).to(device)
@@ -263,15 +252,7 @@ def FNO_model():
                 labels_np = labels_np.transpose(2, 0, 1)
             labels = torch.from_numpy(labels_np.astype(np.float32)).to(device)
             labels = torch.log1p(labels)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                outputs = model(sequences).view(-1, 16, 50)
-                batch_loss = loss(outputs, labels)
 
-            scaler.scale(batch_loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.8)
-            scaler.step(optimizer)
-            scaler.update()
             optimizer.zero_grad()
             outputs = model(sequences).view(-1, 16, 50)
             if torch.isnan(outputs).any() or torch.isinf(outputs).any():
@@ -279,7 +260,7 @@ def FNO_model():
                     print(f"Skipped batch {batch_idx} - NaN outputs")
                 continue
             batch_loss = loss(outputs, labels)
-            if torch.isnan(batch_loss) or torch.isinf(batch_loss) or batch_loss.item() > 1.0:
+            if torch.isnan(batch_loss) or torch.isinf(batch_loss):
                 continue
             epoch_loss += batch_loss.item()
             batch_loss.backward()
@@ -384,7 +365,9 @@ def eval_fno(model, test_set, device):
     model.eval()
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
     total_loss = 0
-    loss_fn = WeightedHuberLoss(label_mean, label_std)
+    loss_fn = torch.nn.PoissonNLLLoss(
+        log_input=True, full=True, reduction='mean', eps=1e-8
+    )
     all_preds, all_labels_out = [], []
 
     with torch.no_grad():

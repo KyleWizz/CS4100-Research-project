@@ -223,7 +223,12 @@ def FNO_model():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=35
     )
-    loss = WeightedHuberLoss(label_mean, label_std)
+    # loss = WeightedHuberLoss(label_mean, label_std)
+    """
+    TESTING WITH POISSON LOSS FOR MORE ACCURATE RESULTS - WEIGHTED HUBER LOSS WAS USED
+    TO GET RESULTS
+    """
+    loss = torch.nn.PoissonNLLLoss(reduction='mean', eps=1e-8, full=True)
     # trying MSE loss first and then huber to see if more accurate than CNN
     # Huber loss may be better because there are definitely outliers in the data
     training_loader = torch.utils.data.DataLoader(training_set,
@@ -246,6 +251,7 @@ def FNO_model():
         for batch_idx, batch in enumerate(training_loader):
             # prep
             sequences = torch.stack([encoding(seq) for seq in batch["sequence"]]).to(device)
+            print(sequences.dim())
             labels_np = np.array(batch["labels"])
             if labels_np.shape != (batch_size, 16, 50):
                 labels_np = labels_np.transpose(2, 0, 1)
@@ -259,6 +265,27 @@ def FNO_model():
                     print(f"Skipped batch {batch_idx} - NaN outputs")
                 continue
             batch_loss = loss(outputs, labels)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
             if torch.isnan(batch_loss) or torch.isinf(batch_loss) or batch_loss.item() > 1.0:
                 continue
             epoch_loss += batch_loss.item()

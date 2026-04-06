@@ -135,3 +135,21 @@ print(f"  R² Score:      {r2:.4f}")
 print(f"  Pearson R:     {pearson_r:.4f}")
 print(f"  Spearman R:    {spearman_r:.4f}  <- most reliable for CAGE")
 print("=" * 60)
+import matplotlib.pyplot as plt
+import numpy as np
+
+# after running eval, you have all_preds and all_labels
+preds = np.concatenate(all_preds).flatten()
+labels = np.concatenate(all_labels).flatten()
+
+# sample 5000 points so it's not too dense
+idx = np.random.choice(len(preds), 5000)
+plt.scatter(labels[idx], preds[idx], alpha=0.1, s=1)
+plt.xlabel('Actual CAGE (log1p)')
+plt.ylabel('Predicted CAGE (log1p)')
+plt.title('FNO: Predicted vs Actual CAGE')
+#plt.plot([0, 5], [0, 5], 'r--', label='Perfect prediction')
+m, b = np.polyfit(labels[idx], preds[idx], 1)
+plt.plot(labels[idx], m * labels[idx] + b, 'r-', label=f'Line of best fit')
+plt.legend()
+plt.savefig('fno_scatter.png', dpi=150)

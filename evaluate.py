@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from matplotlib import pyplot as plt
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import r2_score, mean_absolute_error
 from datasets import load_dataset
@@ -162,3 +163,18 @@ elif pearson_r > 0.1:
     print("\nMEDIOCRE but usable.")
 else:
     print("\nmodel not linear")
+
+preds = np.concatenate(all_preds).flatten()
+labels = np.concatenate(all_labels).flatten()
+
+# sample 5000 points so it's not too dense
+idx = np.random.choice(len(preds), 5000)
+plt.scatter(labels[idx], preds[idx], alpha=0.1, s=1)
+plt.xlabel('Actual CAGE (log1p)')
+plt.ylabel('Predicted CAGE (log1p)')
+plt.title('CNN: Predicted vs Actual CAGE')
+#plt.plot([0, 5], [0, 5], 'r--', label='Perfect prediction')
+m, b = np.polyfit(labels[idx], preds[idx], 1)
+plt.plot(labels[idx], m * labels[idx] + b, 'r-', label=f'Line of best fit')
+plt.legend()
+plt.savefig('cnn_scatter.png', dpi=150)
