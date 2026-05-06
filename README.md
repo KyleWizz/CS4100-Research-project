@@ -36,3 +36,5 @@ Our results match Kelley, D. R et al. results at their third quartile results, .
 
 -Develop an actual design for research/potentially gather enough information to create a proper research paper
 
+-Explain CAGE more in depth, and its applications on this readme file in the future- for now, just focusing on the development of the Neural Networks
+
