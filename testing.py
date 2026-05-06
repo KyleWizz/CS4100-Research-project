@@ -11,7 +11,7 @@ import os
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 from neuralop.models import FNO
-
+from torch.utils.data import TensorDataset
 
 # some libs imported in case
 #https://neuraloperator.github.io/dev/theory_guide/fno.html docs
@@ -40,13 +40,13 @@ scikit-learn==1.3.2
 pandas = 2.2.2 for numpy
 experimenting w/ muon - can use optim but 2.5.1 doesnt have moon built into pytorch optim
 """
-sequence_length = 2048
+sequence_length = 10240
 # trained on 2048 bp len sequence (ACTGN)
 
 # task_name = "variant_effect_causal_eqtl"
 # task_name = "bulk_rna_expression"
 # vector of 218 different tissue types - sequence outputs the same vector matrix [218]
-bulk_rna_expression = 218
+
 task_name = "cage_prediction"
 run_name = f"{datetime.now().strftime('FNO_run-%Y%m%d_%H%M%S')}"
 writer = SummaryWriter(log_dir=f"runs/{run_name}")
@@ -96,7 +96,7 @@ training_set = dataset["train"]
 test_set = dataset["test"]
 # since it takes a little!
 epochs = 200
-batch_size = 32
+batch_size = 96
 
 print(training_set)
 
@@ -108,9 +108,26 @@ def encoding(seq):
     mapping = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 0}
     indices = torch.tensor([mapping.get(base, 0) for base in seq])
     one_hot = torch.zeros(4, len(seq))  # [4, 2048]
-    one_hot[indices, torch.arange(len(seq))] = 1
+    #one_hot[indices, torch.arange(len(seq))] = 1
+    one_hot.scatter_(0, indices.unsqueeze(0), 1)
     return one_hot
 
+
+def encode_dataset(hf_dataset):
+    print("Encoding...")
+    seqs = torch.stack([encoding(s) for s in hf_dataset["sequence"]])
+    labels_np = np.array(hf_dataset["labels"])
+    # always transpose from [N, 50, 80] → [N, 80, 50]
+    if labels_np.ndim == 3 and labels_np.shape[1] == 50:
+        labels_np = labels_np.transpose(0, 2, 1)
+    print(f"dimensions: {labels_np.ndim}")
+    labels = torch.from_numpy(labels_np.astype(np.float32))
+    labels = torch.log1p(labels)
+    return TensorDataset(seqs, labels)
+
+train_dataset = encode_dataset(training_set)
+val_dataset   = encode_dataset(dataset['validation'])
+test_dataset  = encode_dataset(test_set)
 
 # data seems to have some outliers, so weight as well
 # CAGE signaling has lots of potential noise, read more:
@@ -180,19 +197,19 @@ class FNO_class(nn.Module):
         #     n_layers=4,
         # )
         self.fno = FNO(
-            n_modes=(32,),  # was 64
+            n_modes=(64,),  # was 64
             in_channels=4,
-            out_channels=16,  # was 32
-            hidden_channels=32,  # was 64
+            out_channels=32,  # was 32
+            hidden_channels=64,  # was 64
             n_layers=3,  # was 4
         )
         self.pool = nn.AdaptiveAvgPool1d(50)  # [batch, 32, 25]
         #using staack
         self.stack = nn.Sequential(
-            nn.Linear(16 * 50, 256),  # 16 not 32
+            nn.Linear(32 * 50, 256),  # 16 not 32
             nn.GELU(),
             nn.Dropout(0.35),
-            nn.Linear(256, 800)
+            nn.Linear(256, 4000)
         )
         # self.stack = nn.Sequential(
         #     nn.Linear(32 * 25, 256),
@@ -203,7 +220,8 @@ class FNO_class(nn.Module):
 
     def forward(self, x):
         # x: [batch, 4, 2048] — no permute needed unlike RNN
-        out = self.fno(x)       # [batch, 32, 2048]
+        with torch.autocast(device_type="cuda", enabled=False):
+            out = self.fno(x.float())  # [batch, 32, 2048]
         out = self.pool(out)    # [batch, 32, 25]
         out = out.flatten(1)    # [batch, 800]
         out = self.stack(out)      # [batch, 800]
@@ -223,49 +241,73 @@ def FNO_model():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=35
     )
+    scaler = torch.amp.GradScaler('cuda')
     # loss = WeightedHuberLoss(label_mean, label_std)
-    loss = torch.nn.PoissonNLLLoss(reduction='mean', eps=1e-8, full=True, log_input=True)
-    # trying MSE loss first and then huber to see if more accurate than CNN
-    # Huber loss may be better because there are definitely outliers in the data
-    training_loader = torch.utils.data.DataLoader(training_set,
-                                                  batch_size=batch_size,
-                                                  shuffle=True,
-                                                  num_workers=0)
-    val_set = dataset['validation']
-    val_loader = torch.utils.data.DataLoader(val_set,
-                                             batch_size=batch_size,
-                                             shuffle=False,
-                                             num_workers=0
-                                             )
-    # print(iter(training_loader))
+    """
+    TESTING WITH POISSON LOSS FOR MORE ACCURATE RESULTS - WEIGHTED HUBER LOSS WAS USED
+    TO GET RESULTS
+    """
+    loss = torch.nn.PoissonNLLLoss(reduction='mean', eps=1e-8, full=True)
+    # # trying MSE loss first and then huber to see if more accurate than CNN
+    # # Huber loss may be better because there are definitely outliers in the data
+    # training_loader = torch.utils.data.DataLoader(training_set,
+    #                                               batch_size=batch_size,
+    #                                               shuffle=True,
+    #                                               num_workers=0,
+    #                                               pin_memory=True,
+    #                                               )
+    # val_set = dataset['validation']
+    # val_loader = torch.utils.data.DataLoader(val_set,
+    #                                          batch_size=batch_size,
+    #                                          shuffle=False,
+    #                                          num_workers=0
+    #                                          )
+    # # print(iter(training_loader))
+
+    training_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     print(f"Starting training for {epochs} epochs...\n")
     best_loss = float('inf')
     patience_counter = 0
     for epoch in range(epochs):
+
         model.train()
         epoch_loss = 0
-        for batch_idx, batch in enumerate(training_loader):
-            # prep
-            sequences = torch.stack([encoding(seq) for seq in batch["sequence"]]).to(device)
-            labels_np = np.array(batch["labels"])
-            if labels_np.shape != (batch_size, 16, 50):
-                labels_np = labels_np.transpose(2, 0, 1)
-            labels = torch.from_numpy(labels_np.astype(np.float32)).to(device)
-            labels = torch.log1p(labels)
-
+        # for batch_idx, batch in enumerate(training_loader):
+        #     # prep
+        #     sequences = torch.stack([encoding(seq) for seq in batch["sequence"]]).to(device)
+        #     labels_np = np.array(batch["labels"])
+        #     if labels_np.shape != (batch_size, 80, 50):
+        #         labels_np = labels_np.transpose(2, 0, 1)
+        #     labels = torch.from_numpy(labels_np.astype(np.float32)).to(device)
+        #     labels = torch.log1p(labels)
+        for batch_idx, (sequences, labels) in enumerate(training_loader):
+            sequences = sequences.to(device)
+            labels = labels.to(device)
             optimizer.zero_grad()
-            outputs = model(sequences).view(-1, 16, 50)
-            if torch.isnan(outputs).any() or torch.isinf(outputs).any():
-                if batch_idx % 100 == 0:
-                    print(f"Skipped batch {batch_idx} - NaN outputs")
-                continue
-            batch_loss = loss(outputs, labels)
-            if torch.isnan(batch_loss) or torch.isinf(batch_loss):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                outputs = model(sequences).view(-1, 80, 50)
+                if torch.isnan(outputs).any() or torch.isinf(outputs).any():
+                    if batch_idx % 100 == 0:
+                        print(f"Skipped batch {batch_idx} - NaN outputs")
+                    continue
+                batch_loss = loss(outputs, labels)
+
+
+
+
+
+
+            if torch.isnan(batch_loss) or torch.isinf(batch_loss) or batch_loss.item() > 1.0:
                 continue
             epoch_loss += batch_loss.item()
-            batch_loss.backward()
+            # batch_loss.backward()
+            scaler.scale(batch_loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.8)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
+            #optimizer.step()
             if batch_idx % 100 == 0:
                 pred_std = outputs.std().item()
                 pred_mean = outputs.mean().item()
@@ -292,14 +334,18 @@ def FNO_model():
         # start checking validation loss for ---
 
         with torch.no_grad():
-            for batch in val_loader:
-                sequences = torch.stack([encoding(s) for s in batch["sequence"]]).to(device)
-                labels_np = np.array(batch["labels"])
-                if labels_np.shape != (labels_np.shape[0], 16, 50):
-                    labels_np = labels_np.transpose(2, 0, 1)
-                labels = torch.from_numpy(labels_np.astype(np.float32)).to(device)
-                labels = torch.log1p(labels)
-                outputs = model(sequences).view(-1, 16, 50)
+            for (sequences, labels) in val_loader:
+                # sequences = torch.stack([encoding(s) for s in batch["sequence"]]).to(device)
+                # labels_np = np.array(batch["labels"])
+                # if labels_np.shape != (labels_np.shape[0], 80, 50):
+                #     labels_np = labels_np.transpose(2, 0, 1)
+                # labels = torch.from_numpy(labels_np.astype(np.float32)).to(device)
+                # labels = torch.log1p(labels)
+                # outputs = model(sequences).view(-1, 80, 50)
+                # val_loss += loss(outputs, labels).item()
+                sequences = sequences.to(device)
+                labels = labels.to(device)
+                outputs = model(sequences).view(-1, 80, 50)
                 val_loss += loss(outputs, labels).item()
             val_loss /= len(val_loader)
             scheduler.step(val_loss)
@@ -365,22 +411,22 @@ def eval_fno(model, test_set, device):
     model.eval()
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
     total_loss = 0
-    loss_fn = torch.nn.PoissonNLLLoss(
-        log_input=True, full=True, reduction='mean', eps=1e-8
-    )
+    loss_fn = WeightedHuberLoss(label_mean, label_std)
     all_preds, all_labels_out = [], []
 
     with torch.no_grad():
-        for batch in test_loader:
-            sequences = torch.stack([encoding(seq) for seq in batch["sequence"]]).to(device)
+        for sequences, labels in test_loader:
+            # sequences = torch.stack([encoding(seq) for seq in batch["sequence"]]).to(device)
+            sequences = sequences.to(device)
+            labels_np = labels.to(device)
 
-            labels_np = np.array(batch["labels"])
+            # labels_np = np.array(batch["labels"])
             actual_bs = labels_np.shape[0]
-            if labels_np.shape != (actual_bs, 16, 50):
+            if labels_np.shape != (actual_bs, 80, 50):
                 labels_np = labels_np.transpose(2, 0, 1)
             labels = torch.from_numpy(labels_np.astype(np.float32)).to(device)
             labels = torch.log1p(labels)
-            outputs = model(sequences).view(-1, 16, 50)
+            outputs = model(sequences).view(-1, 80, 50)
             total_loss += loss_fn(outputs, labels).item()
             #testing r just in case even though metric doesnt matter much since non-lin
             all_preds.append(outputs.cpu().numpy().flatten())
