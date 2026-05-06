@@ -17,7 +17,7 @@ metric measured was Pearson R, and the reason why the models created do not outp
 
 | Model | Pearson R |
 
-Basenji CNN Kelley, D. R et al. | .77 (for non-zero genes), .85 across cell types
+Basenji CNN Kelley, D. R et al. | .77 (for non-zero genes), .85 across all cell types
 
 | FNO | 0.3657    |
 
@@ -25,7 +25,7 @@ Basenji CNN Kelley, D. R et al. | .77 (for non-zero genes), .85 across cell type
 
 | CNN | 0.1753    |
 
-Our results match Kelley, D. R et al. results at their third quartile results, .3673, which suggests that the models created in this project were able to outperform some of the CNN's trained on a larger dataset.
+Our results match Kelley, D. R et al. results at their third quartile results, .3673 (for single cell types), which suggests that the models created in this project were able to outperform some of the CNN's trained on a larger dataset.
 
 
 ## Next Steps:
